@@ -111,24 +111,13 @@ export function parseClineCatalog(payloads: readonly unknown[]): DiscoveredModel
   const free = new Map(
     (recommended?.free ?? []).flatMap((model) => model.id ? [[model.id, model] as const] : []),
   );
-  const models = catalog
+  return catalog
     .filter((model): model is RichCatalogEntry & { id: string } =>
       Boolean(model.id) &&
       (free.has(model.id!) || isExplicitlyFree(model)) &&
       (model.supported_parameters ?? []).includes("tools")
     )
     .map((model) => richModel(model, free.get(model.id)?.name ?? model.name));
-  // Recommended free ids can be namespaced (e.g. cline-free/muse-spark-1.3-
-  // contributor) with no counterpart in the catalog. Keep them instead of
-  // dropping them in the intersection above.
-  const seen = new Set(models.map((model) => model.id));
-  for (const [id, entry] of free) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      models.push({ id, name: entry.name ?? id });
-    }
-  }
-  return models;
 }
 
 export const KILO: GatewaySpec = {
