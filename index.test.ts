@@ -88,7 +88,10 @@ const clineCatalog = {
   ],
 };
 const clineRecommended = {
-  free: [{ id: "z-ai/glm-free", name: "glm-free" }],
+  free: [
+    { id: "z-ai/glm-free", name: "glm-free" },
+    { id: "cline-free/muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor" },
+  ],
   clinePass: [{ id: "paid/model", name: "Paid" }],
 };
 
@@ -135,6 +138,7 @@ test("provider adapters keep only free chat-compatible models", () => {
     "z-ai/glm-free",
     "catalog/model:free",
     "openrouter/free",
+    "cline-free/muse-spark-1.3-contributor",
   ]);
   assert.deepEqual(cline[0].input, ["text", "image"]);
 });
