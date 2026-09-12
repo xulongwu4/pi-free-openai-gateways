@@ -108,16 +108,21 @@ export function parseTokenRouterCatalog(payload: unknown): DiscoveredModel[] {
 export function parseClineCatalog(payloads: readonly unknown[]): DiscoveredModel[] {
   const catalog = entries(payloads[0]) as RichCatalogEntry[];
   const recommended = payloads[1] as { free?: RecommendedEntry[] } | undefined;
+  // The recommended list prefixes Cline-hosted free models with "cline-free/"
+  // (e.g. cline-free/solar-pro4) while the catalog keeps the upstream vendor id
+  // (e.g. upstage/solar-pro4), so match on the slug after the first "/" instead
+  // of the full id.
   const free = new Map(
-    (recommended?.free ?? []).flatMap((model) => model.id ? [[model.id, model] as const] : []),
+    (recommended?.free ?? []).flatMap((model) =>
+      model.id ? [[model.id.split("/").at(-1)!, model] as const] : []),
   );
   return catalog
     .filter((model): model is RichCatalogEntry & { id: string } =>
       Boolean(model.id) &&
-      (free.has(model.id!) || isExplicitlyFree(model)) &&
+      (free.has(model.id!.split("/").at(-1)!) || isExplicitlyFree(model)) &&
       (model.supported_parameters ?? []).includes("tools")
     )
-    .map((model) => richModel(model, free.get(model.id)?.name ?? model.name));
+    .map((model) => richModel(model, free.get(model.id!.split("/").at(-1)!)?.name ?? model.name));
 }
 
 export const KILO: GatewaySpec = {
