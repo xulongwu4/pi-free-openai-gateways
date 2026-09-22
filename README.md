@@ -28,10 +28,12 @@ All exposed models are registered at zero cost. Cline is the only provider readi
 
 Catalogs are cached with `0600` permissions at:
 
-- `$PI_CODING_AGENT_DIR/kilo/models.json`
-- `$PI_CODING_AGENT_DIR/aihubmix/models.json`
-- `$PI_CODING_AGENT_DIR/cline/models.json`
-- `$PI_CODING_AGENT_DIR/tokenrouter/models.json`
+- `$XDG_CACHE_HOME/pi/kilo/models.json`
+- `$XDG_CACHE_HOME/pi/aihubmix/models.json`
+- `$XDG_CACHE_HOME/pi/cline/models.json`
+- `$XDG_CACHE_HOME/pi/tokenrouter/models.json`
+
+(`~/.cache/pi/...` when `XDG_CACHE_HOME` is unset.)
 
 ## Base URL and route-marker
 

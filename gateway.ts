@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   createProvider,
@@ -7,7 +8,7 @@ import {
   type Model,
   type Provider,
 } from "@earendil-works/pi-ai/compat";
-import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const CATALOG_TIMEOUT_MS = 15_000;
 export type GatewayModel = Model<"openai-completions">;
@@ -66,13 +67,17 @@ function materialize(spec: GatewaySpec, model: DiscoveredModel): GatewayModel {
   };
 }
 
-function cachePath(spec: GatewaySpec, agentDir: string): string {
-  return join(agentDir, spec.id, "models.json");
+function defaultCacheDir(): string {
+  return join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "pi");
 }
 
-function loadCachedModels(spec: GatewaySpec, agentDir: string): GatewayModel[] | undefined {
+function cachePath(spec: GatewaySpec, cacheDir: string): string {
+  return join(cacheDir, spec.id, "models.json");
+}
+
+function loadCachedModels(spec: GatewaySpec, cacheDir: string): GatewayModel[] | undefined {
   try {
-    const models = JSON.parse(readFileSync(cachePath(spec, agentDir), "utf8")) as GatewayModel[];
+    const models = JSON.parse(readFileSync(cachePath(spec, cacheDir), "utf8")) as GatewayModel[];
     if (
       !Array.isArray(models) ||
       models.length === 0 ||
@@ -93,9 +98,9 @@ function loadCachedModels(spec: GatewaySpec, agentDir: string): GatewayModel[] |
   }
 }
 
-function writeCachedModels(spec: GatewaySpec, models: GatewayModel[], agentDir: string): void {
+function writeCachedModels(spec: GatewaySpec, models: GatewayModel[], cacheDir: string): void {
   try {
-    const path = cachePath(spec, agentDir);
+    const path = cachePath(spec, cacheDir);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(models, null, 2), { mode: 0o600 });
     chmodSync(path, 0o600);
@@ -106,15 +111,15 @@ function writeCachedModels(spec: GatewaySpec, models: GatewayModel[], agentDir: 
 
 export function getCachedOrFallbackModels(
   spec: GatewaySpec,
-  agentDir = getAgentDir(),
+  cacheDir = defaultCacheDir(),
 ): GatewayModel[] {
-  return loadCachedModels(spec, agentDir) ?? spec.fallbackModels.map((model) => materialize(spec, model));
+  return loadCachedModels(spec, cacheDir) ?? spec.fallbackModels.map((model) => materialize(spec, model));
 }
 
 export async function loadGatewayModels(
   spec: GatewaySpec,
   fetcher: typeof fetch = fetch,
-  agentDir = getAgentDir(),
+  cacheDir = defaultCacheDir(),
   signal?: AbortSignal,
   apiKey?: string,
 ): Promise<GatewayModel[]> {
@@ -140,17 +145,17 @@ export async function loadGatewayModels(
       discovered.map((model) => [model.id, materialize(spec, model)] as const),
     ).values()];
     if (models.length === 0) throw new Error(`${spec.name} returned no free chat models`);
-    writeCachedModels(spec, models, agentDir);
+    writeCachedModels(spec, models, cacheDir);
     return models;
   } catch {
-    return getCachedOrFallbackModels(spec, agentDir);
+    return getCachedOrFallbackModels(spec, cacheDir);
   }
 }
 
 export function createGatewayProvider(
   spec: GatewaySpec,
   fetcher: typeof fetch = fetch,
-  agentDir?: string,
+  cacheDir?: string,
 ): Provider<"openai-completions"> {
   let fallback: GatewayModel[] | undefined;
   // createProvider merges dynamic models into the baseline permanently; keep
@@ -163,7 +168,7 @@ export function createGatewayProvider(
     models: [],
     async fetchModels(context) {
       const apiKey = context.credential?.type === "api_key" ? context.credential.key : undefined;
-      return loadGatewayModels(spec, fetcher, agentDir, context.signal, apiKey);
+      return loadGatewayModels(spec, fetcher, cacheDir, context.signal, apiKey);
     },
     api: openAICompletionsApi(),
   });
@@ -172,7 +177,7 @@ export function createGatewayProvider(
     ...provider,
     getModels() {
       const models = provider.getModels();
-      return models.length > 0 ? models : (fallback ??= getCachedOrFallbackModels(spec, agentDir));
+      return models.length > 0 ? models : (fallback ??= getCachedOrFallbackModels(spec, cacheDir));
     },
   };
 }
@@ -181,9 +186,9 @@ export function installGateways(
   pi: ExtensionAPI,
   specs: readonly GatewaySpec[],
   fetcher: typeof fetch = fetch,
-  agentDir?: string,
+  cacheDir?: string,
 ): void {
-  for (const spec of specs) pi.registerProvider(createGatewayProvider(spec, fetcher, agentDir));
+  for (const spec of specs) pi.registerProvider(createGatewayProvider(spec, fetcher, cacheDir));
   const providerIds = specs.map((spec) => spec.id);
 
   pi.on("session_start", (_event, ctx) => {
