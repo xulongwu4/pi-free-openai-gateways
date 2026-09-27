@@ -13,10 +13,12 @@ import {
   GATEWAYS,
   KILO,
   TOKENROUTER,
+  clineFreeRouteHeaders,
   parseAIHubMixCatalog,
   parseClineCatalog,
   parseKiloCatalog,
   parseTokenRouterCatalog,
+  refreshClineVersion,
 } from "./providers.ts";
 
 const kiloCatalog = {
@@ -88,7 +90,11 @@ const clineCatalog = {
   ],
 };
 const clineRecommended = {
-  free: [{ id: "z-ai/glm-free", name: "glm-free" }],
+  free: [
+    { id: "z-ai/glm-free", name: "glm-free" },
+    { id: "cline-free/glm-free", name: "Cline GLM" },
+    { id: "stealth/uncatalogued", name: "Stealth" },
+  ],
   clinePass: [{ id: "paid/model", name: "Paid" }],
 };
 
@@ -133,10 +139,20 @@ test("provider adapters keep only free chat-compatible models", () => {
   const cline = parseClineCatalog([clineCatalog, clineRecommended]);
   assert.deepEqual(cline.map((model) => model.id), [
     "z-ai/glm-free",
+    "cline-free/glm-free",
+    "stealth/uncatalogued",
     "catalog/model:free",
     "openrouter/free",
   ]);
   assert.deepEqual(cline[0].input, ["text", "image"]);
+  assert.equal(cline[1].name, "Cline GLM");
+  assert.equal(cline[1].contextWindow, 1_000_000, "cline-free/ ids borrow catalog metadata by slug");
+  assert.equal(cline[2].contextWindow, undefined, "uncatalogued free entries keep defaults");
+
+  assert.equal(clineFreeRouteHeaders({ provider: "cline", id: "cline-free/glm-free" })?.["x-client-type"], "cli");
+  assert.ok(clineFreeRouteHeaders({ provider: "cline", id: "catalog/model:free" }));
+  assert.equal(clineFreeRouteHeaders({ provider: "cline", id: "stealth/uncatalogued" }), undefined);
+  assert.equal(clineFreeRouteHeaders({ provider: "kilo", id: "free/tools:free" }), undefined);
 });
 
 test("Cline keeps a partial free catalog and normalizes zero token limits", async () => {
@@ -148,6 +164,24 @@ test("Cline keeps a partial free catalog and normalizes zero token limits", asyn
         : fakeFetch(input), agentDir);
     assert.deepEqual(models.map((model) => model.id), ["catalog/model:free", "openrouter/free"]);
     assert.equal(models.find((model) => model.id === "openrouter/free")?.maxTokens, 16_384);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("Cline still lists recommended free models when the main catalog is down", async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-cline-catalog-down-"));
+  try {
+    const models = await loadGatewayModels(CLINE, (input) =>
+      String(input).endsWith("recommended-models")
+        ? fakeFetch(input)
+        : Promise.resolve(new Response("down", { status: 503 })), agentDir);
+    assert.deepEqual(models.map((model) => model.id), [
+      "z-ai/glm-free",
+      "cline-free/glm-free",
+      "stealth/uncatalogued",
+    ]);
+    assert.ok(models.every((model) => model.contextWindow === 128_000 && model.maxTokens === 16_384));
   } finally {
     rmSync(agentDir, { recursive: true, force: true });
   }
@@ -265,23 +299,50 @@ test("shared loader fetches all adapter paths, caches, and falls back offline", 
 
 test("registers all native providers and refreshes without blocking startup", async () => {
   const providers: Provider[] = [];
-  let sessionStart: ((event: unknown, ctx: any) => void) | undefined;
+  const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   let finishRefresh!: (value: { errors: Map<string, Error> }) => void;
   const pending = new Promise<{ errors: Map<string, Error> }>((resolve) => { finishRefresh = resolve; });
+  const realFetch = globalThis.fetch;
+  let npmVersion: Promise<Response> = Promise.resolve(Response.json({ version: "9.9.9" }));
+  globalThis.fetch = (() => npmVersion) as typeof fetch;
 
-  extension({
-    registerProvider(provider: Provider) { providers.push(provider); },
-    on(event: string, handler: (event: unknown, ctx: any) => void) {
-      if (event === "session_start") sessionStart = handler;
-    },
-  } as any);
+  try {
+    extension({
+      registerProvider(provider: Provider) { providers.push(provider); },
+      on(event: string, handler: (event: any, ctx: any) => unknown) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+    } as any);
 
-  assert.deepEqual(providers.map((provider) => provider.id), ["kilo", "aihubmix", "cline", "tokenrouter"]);
-  assert.ok(providers.every((provider) => provider.auth.apiKey));
-  const returned = sessionStart?.({}, { modelRegistry: { refresh: () => pending } });
-  assert.equal(returned, undefined);
-  finishRefresh({ errors: new Map() });
-  await pending;
+    assert.deepEqual(providers.map((provider) => provider.id), ["kilo", "aihubmix", "cline", "tokenrouter"]);
+    assert.ok(providers.every((provider) => provider.auth.apiKey));
+    const returned = handlers.get("session_start")!.map((handler) =>
+      handler({}, { modelRegistry: { refresh: () => pending } })
+    );
+    assert.deepEqual(returned, [undefined, undefined], "session_start handlers must not block startup");
+    finishRefresh({ errors: new Map() });
+    await pending;
+    await npmVersion;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const [headersHook] = handlers.get("before_provider_headers")!;
+    const headersFor = (model: { provider: string; id: string }) => {
+      const event = { headers: { authorization: "Bearer x" } as Record<string, string> };
+      headersHook(event, { model });
+      return event.headers;
+    };
+    assert.equal(headersFor({ provider: "cline", id: "cline-free/x" })["x-client-version"], "9.9.9");
+    assert.deepEqual(headersFor({ provider: "kilo", id: "x/y:free" }), { authorization: "Bearer x" });
+    assert.deepEqual(headersFor({ provider: "cline", id: "stealth/x" }), { authorization: "Bearer x" });
+
+    // Failed or malformed registry responses keep the last good version.
+    await refreshClineVersion(() => Promise.resolve(new Response("down", { status: 503 })));
+    await refreshClineVersion(() => Promise.resolve(Response.json({ version: "1.0\r\nx-evil: 1" })));
+    await refreshClineVersion(() => Promise.reject(new Error("offline")));
+    assert.equal(clineFreeRouteHeaders({ provider: "cline", id: "cline-free/x" })?.["x-client-version"], "9.9.9");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("models.json baseUrl and route-marker wrapping survive dynamic refresh", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-gateways",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Free-model Kilo, AIHubMix, Cline, and TokenRouter providers for Pi",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "kilo", "aihubmix", "cline", "tokenrouter", "openai", "gateway"],

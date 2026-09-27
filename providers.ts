@@ -1,4 +1,5 @@
-import type { DiscoveredModel, GatewaySpec } from "./gateway.ts";
+import { release } from "node:os";
+import { CATALOG_TIMEOUT_MS, type DiscoveredModel, type GatewaySpec } from "./gateway.ts";
 
 type RichCatalogEntry = {
   id?: string;
@@ -105,19 +106,25 @@ export function parseTokenRouterCatalog(payload: unknown): DiscoveredModel[] {
     }));
 }
 
+// recommended.free ids (cline-free/x, stealth/x) are the free routes; the catalog
+// lists the same model under its vendor id (e.g. meta/x). Keep the recommended
+// id and borrow metadata from the catalog entry with the same slug.
+const slug = (id: string) => id.split("/").at(-1)!;
+
 export function parseClineCatalog(payloads: readonly unknown[]): DiscoveredModel[] {
-  const catalog = entries(payloads[0]) as RichCatalogEntry[];
-  const recommended = payloads[1] as { free?: RecommendedEntry[] } | undefined;
-  const free = new Map(
-    (recommended?.free ?? []).flatMap((model) => model.id ? [[model.id, model] as const] : []),
-  );
-  return catalog
+  const catalog = (entries(payloads[0]) as RichCatalogEntry[])
     .filter((model): model is RichCatalogEntry & { id: string } =>
-      Boolean(model.id) &&
-      (free.has(model.id!) || isExplicitlyFree(model)) &&
-      (model.supported_parameters ?? []).includes("tools")
-    )
-    .map((model) => richModel(model, free.get(model.id)?.name ?? model.name));
+      Boolean(model.id) && (model.supported_parameters ?? []).includes("tools")
+    );
+  const bySlug = new Map(catalog.map((model) => [slug(model.id), model]));
+  const recommended = payloads[1] as { free?: RecommendedEntry[] } | undefined;
+  const recommendedFree = (recommended?.free ?? []).flatMap((entry): DiscoveredModel[] => {
+    if (!entry.id) return [];
+    const match = bySlug.get(slug(entry.id));
+    const name = entry.name ?? match?.name;
+    return [match ? { ...richModel(match, name), id: entry.id } : { id: entry.id, name }];
+  });
+  return [...recommendedFree, ...catalog.filter(isExplicitlyFree).map((model) => richModel(model))];
 }
 
 export const KILO: GatewaySpec = {
@@ -177,6 +184,37 @@ export const CLINE: GatewaySpec = {
   catalogPaths: ["ai/cline/models", "ai/cline/recommended-models"],
   parseCatalog: parseClineCatalog,
 };
+
+// Cline gates its free routes behind "Cline product surfaces" (HTTP 403
+// otherwise), so those requests identify as the Cline CLI, as pi-cline-pass does.
+const CLINE_VERSION_PATTERN = /^[\w.\-+]+$/;
+let clineVersion = "3.0.61";
+
+export async function refreshClineVersion(fetcher: typeof fetch = fetch): Promise<void> {
+  try {
+    const response = await fetcher("https://registry.npmjs.org/cline/latest", {
+      signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    });
+    const { version } = (await response.json()) as { version?: unknown };
+    if (response.ok && typeof version === "string" && CLINE_VERSION_PATTERN.test(version)) clineVersion = version;
+  } catch {
+    // Keep the last known version.
+  }
+}
+
+export function clineFreeRouteHeaders(
+  model: { provider?: string; id?: string } | undefined,
+): Record<string, string> | undefined {
+  const id = model?.id ?? "";
+  if (model?.provider !== CLINE.id || !(id.startsWith("cline-free/") || slug(id).endsWith(":free"))) return;
+  return {
+    "x-client-type": "cli",
+    "x-client-version": clineVersion,
+    "x-core-version": clineVersion,
+    "x-platform": process.platform,
+    "x-platform-version": release(),
+  };
+}
 
 export const TOKENROUTER: GatewaySpec = {
   id: "tokenrouter",
